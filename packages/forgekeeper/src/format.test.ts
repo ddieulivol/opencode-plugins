@@ -161,7 +161,9 @@ describe('footerSegments', () => {
       },
       loading: false,
     });
-    const requests = [
+
+    // More than 3 open MRs → grouped counts; headline is "N open MRs".
+    const manyRequests = [
       mr({ iid: '1', duoReviewState: 'REVIEW_STARTED' }),
       mr({
         iid: '2',
@@ -172,11 +174,44 @@ describe('footerSegments', () => {
       mr({ iid: '3', approved: true, pipeline: undefined }),
       mr({ iid: '4', state: 'merged' }),
       mr({ iid: '5', state: 'closed' }),
+      mr({ iid: '6', pipeline: { status: 'SUCCESS', label: 'passed' } }),
+      mr({ iid: '7', duoReviewState: 'REQUESTED_CHANGES' }),
     ];
-    expect(text(targets(requests))).toBe(
-      '5 MRs · 🤖 2 reviewing · 1 CI failed · 1 conflict · 1 approved · 1 merged · 1 closed',
+    expect(text(targets(manyRequests))).toBe(
+      '5 open MRs · 🤖 2 reviewing · 🤖 1 changes requested · 2 CI failed · 2 passed · 1 conflict · 1 approved · 1 merged · 1 closed',
     );
-    expect(footerSegments(targets(requests)).every((segment) => !segment.url)).toBe(true);
+    // Grouped summary has no links (clicking opens the status dialog).
+    expect(footerSegments(targets(manyRequests)).every((segment) => !segment.url)).toBe(true);
+
+    // 3 or fewer open MRs → list each individually with its link + compact CI state.
+    const fewRequests = [
+      mr({ iid: '1', pipeline: { status: 'FAILED', label: 'failed' } }),
+      mr({ iid: '2', pipeline: { status: 'SUCCESS', label: 'passed' } }),
+      mr({ iid: '3', state: 'merged' }),
+    ];
+    expect(text(targets(fewRequests))).toBe('!1 CI ✗ · !2 CI ✓ · 1 merged');
+    // Each open MR segment has a URL (the factory uses the base url for all MRs).
+    const fewSegments = footerSegments(targets(fewRequests));
+    expect(fewSegments[0].url).toBe(mr().url);
+    expect(fewSegments[1].url).toBe(mr().url);
+
+    // Draft MRs are labelled (needs 2+ for targetsSummary to activate).
+    const draftRequest = [
+      mr({ iid: '1', draft: true, pipeline: { status: 'SUCCESS', label: 'passed' } }),
+      mr({ iid: '2', state: 'merged' }),
+    ];
+    expect(text(targets(draftRequest))).toBe('!1 draft CI ✓ · 1 merged');
+
+    // Duo requested changes shows in per-MR view.
+    const duoChangesRequest = [
+      mr({ iid: '1', duoReviewState: 'REQUESTED_CHANGES', pipeline: { status: 'SUCCESS', label: 'passed' } }),
+      mr({ iid: '2', state: 'merged' }),
+    ];
+    expect(text(targets(duoChangesRequest))).toBe('!1 CI ✓ 🤖 changes · 1 merged');
+
+    // All non-open (e.g. all merged) → show a count.
+    const allMerged = [mr({ iid: '4', state: 'merged' }), mr({ iid: '5', state: 'merged' })];
+    expect(text(targets(allMerged))).toBe('2 MRs · 2 merged');
 
     const failed = [
       {
@@ -184,8 +219,11 @@ describe('footerSegments', () => {
         reason: 'GitLab request failed',
       },
     ];
-    const partial = targets(requests.slice(2, 4), failed);
-    expect(text(partial)).toBe('2 MRs · 1 approved · 1 merged · 1 unavailable');
+    const partial = targets(
+      [mr({ iid: '3', approved: true, pipeline: undefined }), mr({ iid: '4', state: 'merged' })],
+      failed,
+    );
+    expect(text(partial)).toBe('!3 · 1 merged · 1 unavailable');
     expect(detailsMessage(partial)).toContain(
       'Unavailable: https://gitlab.com/group/project/-/merge_requests/6 (GitLab request failed)',
     );

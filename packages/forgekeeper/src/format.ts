@@ -62,39 +62,93 @@ function ci(request: ReviewRequest): Segment {
   };
 }
 
-// Counts the PRs/MRs in each state, for a session with several targets.
-// Clicking a segment without a link opens the status dialog with the details.
+// A compact per-MR state: CI icon + draft flag + Duo review state.
+function mrState(request: ReviewRequest): string {
+  const ciTone = pipelineTone(request.pipeline);
+  const ciText = COMPACT_CI[ciTone] ?? '';
+  const draftText = request.draft ? 'draft ' : '';
+  const duoText = request.duoReviewState === 'REQUESTED_CHANGES' ? '🤖 changes' : '';
+  return [draftText + ciText, duoText].filter(Boolean).join(' ');
+}
+
+// Lists each open MR individually when there are 3 or fewer open targets (each with a link
+// so the user can jump directly). With more than 3, falls back to grouped counts.
+// Merged/closed MRs always appear at the end as muted counts.
 function targetsSummary(requests: ReviewRequest[]): Segment[] {
   const nouns = new Set(requests.map((request) => traitsOf(request).noun));
   const noun = nouns.size === 1 ? [...nouns][0] : 'PR/MR';
-  const count =
-    requests.length === 1
-      ? `1 ${noun}`
-      : `${requests.length} ${noun === 'PR/MR' ? 'PRs/MRs' : `${noun}s`}`;
+
   const open = requests.filter((request) => request.state === 'opened');
-  const segments: Segment[] = [{ text: count, tone: 'muted', essential: true }];
-  const reviewing = open.filter((request) => automatedReview(request)?.state === 'running').length;
-  if (reviewing)
-    segments.push({
-      text: `🤖 ${reviewing} reviewing`,
-      compact: `🤖 ${reviewing}`,
-      tone: 'warning',
-      essential: true,
-    });
-  const failing = open.filter((request) => pipelineTone(request.pipeline) === 'error').length;
-  if (failing)
-    segments.push({ text: `${failing} CI failed`, compact: `CI ✗ ${failing}`, tone: 'error' });
-  const conflicts = open.filter((request) => request.conflicts).length;
-  if (conflicts)
-    segments.push({ text: plural(conflicts, 'conflict'), tone: 'error', essential: true });
-  const approved = open.filter(
-    (request) => request.approved && request.awaitingReviewers.length === 0,
-  ).length;
-  if (approved) segments.push({ text: `${approved} approved`, tone: 'success' });
   const merged = requests.filter((request) => request.state === 'merged').length;
-  if (merged) segments.push({ text: `${merged} merged`, tone: 'success' });
   const closed = requests.length - open.length - merged;
+
+  const segments: Segment[] = [];
+
+  if (open.length <= 3) {
+    // Show each open MR as its own linked segment.
+    for (const request of open) {
+      const state = mrState(request);
+      const ciTone = pipelineTone(request.pipeline);
+      const tone = open.length === 0 ? 'muted' : ciTone === 'error' ? 'error' : 'muted';
+      segments.push({
+        text: state ? `${reference(request)} ${state}` : reference(request),
+        tone,
+        url: request.url,
+        essential: true,
+      });
+    }
+    if (open.length === 0 && requests.length > 0) {
+      // All non-open — show a count so there's still a headline.
+      const total = requests.length;
+      const countText = `${total} ${noun === 'PR/MR' ? 'PRs/MRs' : `${noun}s`}`;
+      segments.push({ text: countText, tone: 'muted', essential: true });
+    }
+  } else {
+    // More than 3 open: grouped counts, headline is open MRs only.
+    const nounPlural = noun === 'PR/MR' ? 'PRs/MRs' : `${noun}s`;
+    segments.push({ text: `${open.length} open ${nounPlural}`, tone: 'muted', essential: true });
+
+    const reviewing = open.filter((request) => automatedReview(request)?.state === 'running').length;
+    if (reviewing)
+      segments.push({
+        text: `🤖 ${reviewing} reviewing`,
+        compact: `🤖 ${reviewing}`,
+        tone: 'warning',
+        essential: true,
+      });
+    const duoChanges = open.filter((request) => request.duoReviewState === 'REQUESTED_CHANGES').length;
+    if (duoChanges)
+      segments.push({
+        text: `🤖 ${duoChanges} changes requested`,
+        compact: `🤖 ✗ ${duoChanges}`,
+        tone: 'error',
+        essential: true,
+      });
+    const failing = open.filter((request) => pipelineTone(request.pipeline) === 'error').length;
+    if (failing)
+      segments.push({ text: `${failing} CI failed`, compact: `CI ✗ ${failing}`, tone: 'error' });
+    const running = open.filter((request) => RUNNING.has(request.pipeline?.status ?? '')).length;
+    if (running)
+      segments.push({ text: `${running} running`, compact: `CI … ${running}`, tone: 'warning' });
+    const passed = open.filter(
+      (request) => pipelineTone(request.pipeline) === 'success',
+    ).length;
+    if (passed) segments.push({ text: `${passed} passed`, compact: `CI ✓ ${passed}`, tone: 'success' });
+    const drafts = open.filter((request) => request.draft).length;
+    if (drafts) segments.push({ text: `${drafts} draft`, tone: 'muted' });
+    const conflicts = open.filter((request) => request.conflicts).length;
+    if (conflicts)
+      segments.push({ text: plural(conflicts, 'conflict'), tone: 'error', essential: true });
+    const approved = open.filter(
+      (request) => request.approved && request.awaitingReviewers.length === 0,
+    ).length;
+    if (approved) segments.push({ text: `${approved} approved`, tone: 'success' });
+  }
+
+  // Merged and closed always at the end, muted, dropped first when narrow.
+  if (merged) segments.push({ text: `${merged} merged`, tone: 'success' });
   if (closed) segments.push({ text: `${closed} closed`, tone: 'muted' });
+
   return segments;
 }
 

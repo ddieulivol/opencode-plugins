@@ -43,7 +43,7 @@
     },
     "packages/forgekeeper": {
       "name": "opencode-forgekeeper",
-      "version": "2.0.0",
+      "version": "2.1.1",
       "peerDependencies": {
         "@opencode/plugin": "^2.0.26",
         "@opentui/core": ">=0.5.8",
