@@ -9,14 +9,17 @@ import type { BoxRenderable } from '@opentui/core';
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 import { exec } from './exec';
 import {
+  approvalCount,
   detailsMessage,
   footerSegments,
+  groupOf,
   pipelineTone,
   responsiveFooterSegments,
   segmentsWidth,
+  waitingOn,
   type Tone,
 } from './format';
-import { yesNo, type ReviewRequest } from './forge';
+import { ownedBy, type ReviewRequest } from './forge';
 import { reference, traitsOf } from './forges';
 import { automatedReview } from './automated-review-watch';
 import { ForgeSessionRpc, HEARTBEAT, HOME, type EventData, type Output } from './rpc';
@@ -131,11 +134,12 @@ export default {
                     fallback={
                       // Segments without a link of their own open the status dialog,
                       // which has the full detail behind the abbreviated indicator.
+                      // filterUrls limits the dialog to the MRs in that group.
                       <text
                         wrapMode="none"
                         flexShrink={0}
                         fg={color(segment.tone)}
-                        onMouseUp={() => showStatus(place())}
+                        onMouseUp={() => showStatus(place(), segment.filterUrls)}
                       >
                         {segment.text}
                       </text>
@@ -214,8 +218,56 @@ export default {
       const request = () => props.request;
       const traits = () => traitsOf(request());
       const review = () => automatedReview(request());
+      const ciTone = () => pipelineTone(request().pipeline);
+      const group = () => groupOf(request());
+      const statusTone = (): Tone => {
+        const g = group();
+        if (g === 'needsYou') return 'error';
+        if (g === 'needsReviewer' || g === 'draft') return 'warning';
+        if (g === 'readyToMerge' || g === 'autoMerge') return 'success';
+        return 'muted';
+      };
+      const statusLabel = (): string => {
+        const r = request();
+        if (r.state !== 'opened') return r.state;
+        if (r.forge === 'gitlab') {
+          const w = waitingOn(r);
+          if (r.draft) return 'draft';
+          if (r.conflicts) return 'needs you: conflicts';
+          return w?.text ?? 'open';
+        }
+        const g = group();
+        if (g === 'needsYou')
+          return ciTone() === 'error' ? 'needs you: CI failed' : 'needs you: conflicts';
+        if (g === 'readyToMerge') return 'ready to merge';
+        if (g === 'waitingOnReviewer')
+          return `awaiting ${r.awaitingReviewers.map((u) => `@${u}`).join(', ')}`;
+        return 'open';
+      };
+      const approvals = () => {
+        const r = request();
+        return ownedBy('gitlab')(r) ? approvalCount(r) : undefined;
+      };
+      const ciText = () => {
+        const r = request();
+        if (!r.pipeline) return `no ${traits().ci}`;
+        return `CI ${r.pipeline.label}`;
+      };
+      const summaryParts = () => {
+        const r = request();
+        const parts: string[] = [ciText()];
+        const a = approvals();
+        if (a) parts.push(a.text);
+        parts.push(`→ ${r.targetBranch}`);
+        return parts.join(' · ');
+      };
+
       return (
         <box gap={1} flexShrink={0}>
+          <text fg={color(statusTone())}>
+            {'● '}
+            {statusLabel()}
+          </text>
           <text fg={context.theme.text.base} onMouseUp={() => openUrl(request().url)}>
             <a href={request().url}>
               <u>
@@ -225,72 +277,50 @@ export default {
               </u>
             </a>
           </text>
-          <box flexShrink={0}>
-            <DetailField
-              label="State"
-              value={request().state}
-              tone={request().state === 'merged' ? 'success' : undefined}
-            />
-            <DetailField
-              label="Target"
-              value={`${request().targetProject} → ${request().targetBranch}`}
-            />
-            <DetailField
-              label={traits().ci.charAt(0).toUpperCase() + traits().ci.slice(1)}
-              value={request().pipeline?.label ?? 'none'}
-              tone={pipelineTone(request().pipeline)}
-              url={request().pipeline?.url}
-            />
-            <DetailField
-              label="Unresolved threads"
-              value={`${request().unresolvedThreads}${request().threadsComplete ? '' : '+'}`}
-              tone={
-                request().unresolvedThreads || !request().threadsComplete ? 'warning' : undefined
-              }
-            />
-            <DetailField
-              label="Draft"
-              value={yesNo(request().draft)}
-              tone={request().draft ? 'warning' : undefined}
-            />
-            <DetailField
-              label="Conflicts"
-              value={request().conflictsKnown ? yesNo(request().conflicts) : 'unknown'}
-              tone={request().conflicts ? 'error' : undefined}
-            />
-          </box>
-          <box flexShrink={0}>
-            <text fg={context.theme.text.base}>
-              <b>Review and approval</b>
+          <text
+            fg={
+              ciTone() === 'error'
+                ? color('error')
+                : ciTone() === 'warning'
+                  ? color('warning')
+                  : context.theme.text.muted
+            }
+            onMouseUp={() => {
+              const u = request().pipeline?.url;
+              if (u) openUrl(u);
+            }}
+          >
+            {summaryParts()}
+          </text>
+          <Show when={request().unresolvedThreads > 0 || !request().threadsComplete}>
+            <text fg={color('warning')}>
+              {`${request().unresolvedThreads}${request().threadsComplete ? '' : '+'} unresolved thread${request().unresolvedThreads === 1 && request().threadsComplete ? '' : 's'}`}
             </text>
-            <For each={traits().details(request())}>
-              {(line) => {
-                const separator = line.indexOf(': ');
-                return separator < 0 ? (
-                  <text fg={context.theme.text.base}>{line}</text>
-                ) : (
-                  <DetailField label={line.slice(0, separator)} value={line.slice(separator + 2)} />
-                );
-              }}
-            </For>
-            <Show when={review()}>
-              {(value: () => NonNullable<ReturnType<typeof automatedReview>>) => (
-                <DetailField
-                  label={`${value().name} review`}
-                  value={value().label}
-                  tone={value().state === 'running' ? 'warning' : undefined}
-                />
-              )}
-            </Show>
-            <Show when={request().awaitingReviewers.length}>
-              <DetailField
-                label="Awaiting review"
-                value={request()
-                  .awaitingReviewers.map((username) => `@${username}`)
-                  .join(', ')}
-              />
-            </Show>
-          </box>
+          </Show>
+          <Show when={request().draft}>
+            <text fg={color('warning')}>Draft</text>
+          </Show>
+          <Show when={request().conflicts}>
+            <text fg={color('error')}>Conflicts</text>
+          </Show>
+          <Show when={!request().conflictsKnown}>
+            <text fg={context.theme.text.muted}>Mergeability unknown</text>
+          </Show>
+          <Show when={review()}>
+            {(value: () => NonNullable<ReturnType<typeof automatedReview>>) => (
+              <text fg={value().state === 'running' ? color('warning') : context.theme.text.muted}>
+                {value().name} review: {value().label}
+              </text>
+            )}
+          </Show>
+          <Show when={request().awaitingReviewers.length}>
+            <text fg={context.theme.text.muted}>
+              Awaiting:{' '}
+              {request()
+                .awaitingReviewers.map((u) => `@${u}`)
+                .join(', ')}
+            </text>
+          </Show>
           <Show when={!request().reviewersComplete}>
             <text fg={color('warning')}>Reviewer list is partial</text>
           </Show>
@@ -303,7 +333,7 @@ export default {
       );
     }
 
-    function StatusDetails(props: { snapshot: Snapshot }) {
+    function StatusDetails(props: { snapshot: Snapshot; filterUrls?: string[] }) {
       const lookup = () => {
         const value = props.snapshot.lookup;
         return value?.kind === 'found' ? value : undefined;
@@ -352,7 +382,13 @@ export default {
                 <Show when={found().requests.length === 0}>
                   <text fg={context.theme.text.muted}>No PR/MR status available.</text>
                 </Show>
-                <For each={found().requests}>
+                <For
+                  each={
+                    props.filterUrls
+                      ? found().requests.filter((r) => props.filterUrls!.includes(r.url))
+                      : found().requests
+                  }
+                >
                   {(request) => (
                     <RequestDetails request={request} head={found().repository?.head} />
                   )}
@@ -378,7 +414,7 @@ export default {
       );
     }
 
-    function StatusDialog(props: { place: Place }) {
+    function StatusDialog(props: { place: Place; filterUrls?: string[] }) {
       const [terminalHeight, setTerminalHeight] = createSignal(context.renderer.height);
       const onResize = () => setTerminalHeight(context.renderer.height);
       context.renderer.on('resize', onResize);
@@ -446,7 +482,7 @@ export default {
             scrollX={false}
             contentOptions={{ flexShrink: 0 }}
           >
-            <StatusDetails snapshot={snapshot()} />
+            <StatusDetails snapshot={snapshot()} filterUrls={props.filterUrls} />
           </scrollbox>
           <box height={1} flexShrink={0} flexDirection="row" justifyContent="flex-end">
             <For each={['close', 'refresh'] as const}>
@@ -496,11 +532,11 @@ export default {
       );
     }
 
-    function showStatus(place = currentPlace()) {
+    function showStatus(place = currentPlace(), filterUrls?: string[]) {
       if (statusOff(place)) return;
       void refresh(place);
       context.ui.dialog.set({ size: 'large', centered: true });
-      context.ui.dialog.show(() => <StatusDialog place={place} />);
+      context.ui.dialog.show(() => <StatusDialog place={place} filterUrls={filterUrls} />);
     }
 
     async function openRequest() {

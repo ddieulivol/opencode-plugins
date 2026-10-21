@@ -43,6 +43,10 @@ export interface GitLabMergeRequest extends Common {
   // Approvals from people; bot approvals such as Duo's don't count.
   hasApprovals: boolean;
   approvalRequirementsSatisfied: boolean | null;
+  approvalsRequired: number;
+  approvalsLeft: number;
+  autoMergeEnabled: boolean;
+  mergeTrainIndex: number | null;
   mergeStatus?: string;
   duoReviewState?: string;
 }
@@ -73,6 +77,7 @@ export interface Indicator {
   url?: string;
   compact?: string;
   essential?: boolean;
+  filterUrls?: string[];
 }
 
 // Everything that differs between forges, apart from API access: identity,

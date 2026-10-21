@@ -278,11 +278,7 @@ describe('GitLabForge.findByNumber', () => {
         hasApprovals: approvers.length > 0,
         approvalRequirementsSatisfied: requirements,
       });
-      const segments = footerSegments({
-        loading: false,
-        lookup: { kind: 'found', requests: [mr!] },
-      });
-      expect(segments.some((segment) => segment.text === 'approved')).toBe(approved);
+      expect(mr!.approved).toBe(approved);
     },
   );
 

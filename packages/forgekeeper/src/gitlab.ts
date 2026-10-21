@@ -5,7 +5,6 @@ import {
   ownedBy,
   parseWebUrl,
   prefixReferences,
-  yesNo,
   type AutomatedReviewState,
   type Forge,
   type ForgeTraits,
@@ -30,6 +29,10 @@ interface MergeRequestNode {
   conflicts: boolean;
   approved: boolean | null;
   approvedBy: { nodes: Array<{ id: string; bot?: boolean }> } | null;
+  approvalsRequired: number | null;
+  approvalsLeft: number | null;
+  autoMergeEnabled: boolean;
+  mergeTrainIndex: number | null;
   detailedMergeStatus: string | null;
   diffHeadSha: string | null;
   updatedAt: string | null;
@@ -65,6 +68,7 @@ export const MAX_DISCUSSION_PAGES = 50;
 
 const MERGE_REQUEST_FIELDS = `
   iid title webUrl state draft conflicts approved detailedMergeStatus diffHeadSha updatedAt targetBranch
+  approvalsRequired approvalsLeft autoMergeEnabled mergeTrainIndex
   approvedBy(first: 100) { nodes { id bot } }
   sourceProject { fullPath }
   targetProject { fullPath }
@@ -211,13 +215,13 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
   titleReferences: (title) => prefixReferences(title, '!'),
   indicators: () => [],
   details(request) {
-    const requirements =
-      request.approvalRequirementsSatisfied === null
-        ? 'unknown'
-        : yesNo(request.approvalRequirementsSatisfied);
+    const given = request.approvalsRequired - request.approvalsLeft;
     const lines = [
-      `Human approvals: ${yesNo(request.hasApprovals)} · Approval requirements satisfied: ${requirements}`,
+      `Approvals: ${given}/${request.approvalsRequired}${request.approvalsLeft === 0 ? ' (requirements satisfied)' : ''}`,
     ];
+    if (request.autoMergeEnabled) lines.push('Auto-merge: set');
+    if (request.mergeTrainIndex !== null)
+      lines.push(`Merge train: position ${request.mergeTrainIndex + 1}`);
     if (request.mergeStatus) lines.push(`Merge status: ${humanize(request.mergeStatus)}`);
     return lines;
   },
@@ -373,6 +377,10 @@ export class GitLabForge implements Forge {
       approved: node.approved === true && hasApprovals && awaitingReviewers.length === 0,
       hasApprovals,
       approvalRequirementsSatisfied: node.approved,
+      approvalsRequired: node.approvalsRequired ?? 0,
+      approvalsLeft: node.approvalsLeft ?? 0,
+      autoMergeEnabled: node.autoMergeEnabled,
+      mergeTrainIndex: node.mergeTrainIndex,
       awaitingReviewers,
       reviewersComplete: true,
       mergeStatus: node.detailedMergeStatus ?? undefined,

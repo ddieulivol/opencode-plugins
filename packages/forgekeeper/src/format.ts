@@ -1,5 +1,12 @@
 import { automatedReview } from './automated-review-watch';
-import { yesNo, type Indicator, type Pipeline, type ReviewRequest, type Tone } from './forge';
+import {
+  yesNo,
+  type GitLabMergeRequest,
+  type Indicator,
+  type Pipeline,
+  type ReviewRequest,
+  type Tone,
+} from './forge';
 import { reference, traitsOf } from './forges';
 import type { Snapshot } from './store';
 
@@ -40,6 +47,62 @@ function awaitingText(reviewers: string[]) {
   return `awaiting ${reviewers.map((username) => `@${username}`).join(', ')}`;
 }
 
+// "1/2 approvals" or "2/2 approved". Returns undefined when no approvals are required.
+export function approvalCount(request: GitLabMergeRequest): Segment | undefined {
+  const { approvalsRequired, approvalsLeft } = request;
+  if (approvalsRequired === 0) return undefined;
+  const given = approvalsRequired - approvalsLeft;
+  const done = approvalsLeft === 0;
+  return {
+    text: done
+      ? `${approvalsRequired}/${approvalsRequired} approved`
+      : `${given}/${approvalsRequired} approvals`,
+    compact: done
+      ? `${approvalsRequired}/${approvalsRequired} ✓`
+      : `${given}/${approvalsRequired} ✓`,
+    tone: done ? 'success' : 'warning',
+  };
+}
+
+// What is blocking this MR from merging? Returns the most actionable label.
+export function waitingOn(request: GitLabMergeRequest): Segment | undefined {
+  if (request.draft) return undefined;
+
+  const changesRequested =
+    request.awaitingReviewers.length === 0 &&
+    !request.approvalRequirementsSatisfied &&
+    request.mergeStatus === 'REQUESTED_CHANGES';
+  if (changesRequested)
+    return { text: 'needs you: changes requested', tone: 'error', essential: true };
+
+  if (request.conflicts) return undefined;
+
+  if (!request.approved) {
+    if (request.awaitingReviewers.length) {
+      return { text: awaitingText(request.awaitingReviewers), tone: 'muted' };
+    }
+    return { text: 'needs a reviewer', tone: 'muted' };
+  }
+
+  const ciTone = pipelineTone(request.pipeline);
+  if (ciTone === 'error') return { text: 'needs you: CI failed', tone: 'error', essential: true };
+
+  if (request.mergeTrainIndex !== null) {
+    return { text: `merge train #${request.mergeTrainIndex + 1}`, tone: 'muted' };
+  }
+
+  if (request.autoMergeEnabled) {
+    return {
+      text: ciTone === 'warning' ? 'auto-merge set, CI running' : 'auto-merge set',
+      tone: 'success',
+    };
+  }
+
+  if (ciTone === 'warning') return { text: 'waiting on CI', tone: 'muted' };
+
+  return { text: 'ready to merge', tone: 'success' };
+}
+
 function threadsText(request: ReviewRequest) {
   return `${request.unresolvedThreads}${request.threadsComplete ? '' : '+'} unresolved thread${request.unresolvedThreads === 1 && request.threadsComplete ? '' : 's'}`;
 }
@@ -62,8 +125,40 @@ function ci(request: ReviewRequest): Segment {
   };
 }
 
+type GroupKey =
+  | 'needsYou'
+  | 'needsReviewer'
+  | 'readyToMerge'
+  | 'draft'
+  | 'autoMerge'
+  | 'waitingOnCI'
+  | 'waitingOnReviewer'
+  | 'other';
+
+export function groupOf(request: ReviewRequest): GroupKey {
+  if (request.state !== 'opened') return 'other';
+  if (request.forge !== 'gitlab') {
+    if (pipelineTone(request.pipeline) === 'error' || request.conflicts) return 'needsYou';
+    if (request.approved && request.awaitingReviewers.length === 0) return 'readyToMerge';
+    if (request.awaitingReviewers.length) return 'waitingOnReviewer';
+    return 'other';
+  }
+  if (request.draft) return 'draft';
+  if (request.conflicts) return 'needsYou';
+  const w = waitingOn(request);
+  if (!w) return 'other';
+  if (w.text.startsWith('needs you')) return 'needsYou';
+  if (w.text === 'needs a reviewer') return 'needsReviewer';
+  if (w.text === 'ready to merge') return 'readyToMerge';
+  if (w.text === 'auto-merge set' || w.text === 'auto-merge set, CI running') return 'autoMerge';
+  if (request.mergeTrainIndex !== null) return 'autoMerge';
+  if (w.text === 'waiting on CI') return 'waitingOnCI';
+  if (w.text.startsWith('awaiting')) return 'waitingOnReviewer';
+  return 'other';
+}
+
 // Counts the PRs/MRs in each state, for a session with several targets.
-// Clicking a segment without a link opens the status dialog with the details.
+// Clicking a segment opens the status dialog filtered to just those MRs.
 function targetsSummary(requests: ReviewRequest[]): Segment[] {
   const nouns = new Set(requests.map((request) => traitsOf(request).noun));
   const noun = nouns.size === 1 ? [...nouns][0] : 'PR/MR';
@@ -72,26 +167,53 @@ function targetsSummary(requests: ReviewRequest[]): Segment[] {
       ? `1 ${noun}`
       : `${requests.length} ${noun === 'PR/MR' ? 'PRs/MRs' : `${noun}s`}`;
   const open = requests.filter((request) => request.state === 'opened');
+
+  const groups = new Map<GroupKey, ReviewRequest[]>();
+  for (const r of open) {
+    const key = groupOf(r);
+    const arr = groups.get(key);
+    if (arr) arr.push(r);
+    else groups.set(key, [r]);
+  }
+  const urls = (key: GroupKey) => (groups.get(key) ?? []).map((r) => r.url);
+  const seg = (
+    key: GroupKey,
+    text: string,
+    tone: Tone,
+    essential?: boolean,
+  ): Segment | undefined => {
+    const n = groups.get(key)?.length ?? 0;
+    if (!n) return undefined;
+    return { text: `${n} ${text}`, tone, essential, filterUrls: urls(key) };
+  };
+
   const segments: Segment[] = [{ text: count, tone: 'muted', essential: true }];
-  const reviewing = open.filter((request) => automatedReview(request)?.state === 'running').length;
+
+  const reviewing = open.filter((r) => automatedReview(r)?.state === 'running').length;
   if (reviewing)
     segments.push({
       text: `🤖 ${reviewing} reviewing`,
       compact: `🤖 ${reviewing}`,
       tone: 'warning',
       essential: true,
+      filterUrls: open.filter((r) => automatedReview(r)?.state === 'running').map((r) => r.url),
     });
-  const failing = open.filter((request) => pipelineTone(request.pipeline) === 'error').length;
-  if (failing)
-    segments.push({ text: `${failing} CI failed`, compact: `CI ✗ ${failing}`, tone: 'error' });
-  const conflicts = open.filter((request) => request.conflicts).length;
-  if (conflicts)
-    segments.push({ text: plural(conflicts, 'conflict'), tone: 'error', essential: true });
-  const approved = open.filter(
-    (request) => request.approved && request.awaitingReviewers.length === 0,
-  ).length;
-  if (approved) segments.push({ text: `${approved} approved`, tone: 'success' });
-  const merged = requests.filter((request) => request.state === 'merged').length;
+
+  const order: [GroupKey, string, Tone, boolean?][] = [
+    ['needsYou', 'needs you', 'error', true],
+    ['needsReviewer', 'needs a reviewer', 'warning', true],
+    ['readyToMerge', 'ready to merge', 'success'],
+    ['draft', 'draft', 'muted'],
+    ['autoMerge', 'auto-merge set', 'success'],
+    ['waitingOnCI', 'waiting on CI', 'muted'],
+    ['waitingOnReviewer', 'waiting on reviewer', 'muted'],
+  ];
+  for (const [key, text, tone, essential] of order) {
+    const s = seg(key, text, tone, essential);
+    if (s) segments.push(s);
+  }
+
+  const merged = requests.filter((r) => r.state === 'merged').length;
   if (merged) segments.push({ text: `${merged} merged`, tone: 'success' });
   const closed = requests.length - open.length - merged;
   if (closed) segments.push({ text: `${closed} closed`, tone: 'muted' });
@@ -154,9 +276,16 @@ export function footerSegments(snapshot: Snapshot): Segment[] {
   segments.push(...traitsOf(request).indicators(request));
   if (request.conflicts) segments.push({ text: 'conflicts', tone: 'error', essential: true });
   if (!request.conflictsKnown) segments.push({ text: 'mergeability unknown', tone: 'muted' });
-  if (request.awaitingReviewers.length)
-    segments.push({ text: awaitingText(request.awaitingReviewers), tone: 'muted' });
-  else if (request.approved) segments.push({ text: 'approved', tone: 'success' });
+  if (request.forge === 'gitlab') {
+    const count = approvalCount(request);
+    if (count) segments.push(count);
+    const next = waitingOn(request);
+    if (next) segments.push(next);
+  } else {
+    if (request.awaitingReviewers.length)
+      segments.push({ text: awaitingText(request.awaitingReviewers), tone: 'muted' });
+    else if (request.approved) segments.push({ text: 'approved', tone: 'success' });
+  }
   return [...segments, ...stale];
 }
 

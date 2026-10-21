@@ -25,6 +25,10 @@ const merge: GitLabMergeRequest = {
   url: 'https://gitlab.com/o/r/-/merge_requests/7',
   hasApprovals: false,
   approvalRequirementsSatisfied: null,
+  approvalsRequired: 1,
+  approvalsLeft: 1,
+  autoMergeEnabled: false,
+  mergeTrainIndex: null,
   duoReviewState: 'REVIEW_STARTED',
   mergeStatus: 'CI_MUST_PASS',
 };
@@ -75,7 +79,7 @@ describe('forge traits', () => {
     expect(traitsOf(merge)).toBe(traits('gitlab'));
     expect(traitsOf(pull)).toBe(traits('github'));
     expect(traitsOf(merge).details(merge)).toEqual([
-      'Human approvals: no · Approval requirements satisfied: unknown',
+      'Approvals: 0/1',
       'Merge status: ci must pass',
     ]);
     expect(traitsOf(pull).details(pull)).toEqual(['Review decision: changes requested']);
@@ -86,7 +90,13 @@ describe('forge traits', () => {
       footerSegments({ loading: false, lookup: { kind: 'found', requests: [request] } }).map(
         (segment) => segment.text,
       );
-    expect(text(merge)).toEqual(['!7', 'no pipeline', '🤖 reviewing']);
+    expect(text(merge)).toEqual([
+      '!7',
+      'no pipeline',
+      '🤖 reviewing',
+      '0/1 approvals',
+      'needs a reviewer',
+    ]);
     expect(text(pull)).toEqual(['#7', 'no checks', 'changes requested']);
     const fit = (width: number) =>
       responsiveFooterSegments(

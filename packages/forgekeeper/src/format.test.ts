@@ -26,6 +26,10 @@ const mr = (overrides: Partial<GitLabMergeRequest> = {}): GitLabMergeRequest => 
   approved: false,
   hasApprovals: false,
   approvalRequirementsSatisfied: false,
+  approvalsRequired: 1,
+  approvalsLeft: 1,
+  autoMergeEnabled: false,
+  mergeTrainIndex: null,
   targetProject: 'group/project',
   targetBranch: 'main',
   headSha: 'local',
@@ -50,7 +54,7 @@ const text = (value: Snapshot) =>
 describe('footerSegments', () => {
   test('shows an active Duo review', () => {
     expect(text(snapshot([mr({ duoReviewState: 'REVIEW_STARTED' })]))).toBe(
-      '!4281 · CI failed · 2 unresolved threads · 🤖 reviewing',
+      '!4281 · CI failed · 2 unresolved threads · 🤖 reviewing · 0/1 approvals · needs a reviewer',
     );
   });
 
@@ -67,30 +71,87 @@ describe('footerSegments', () => {
     );
   });
   test('shows the MR, pipeline, and threads', () => {
-    expect(text(snapshot([mr()]))).toBe('!4281 · CI failed · 2 unresolved threads');
+    expect(text(snapshot([mr()]))).toBe(
+      '!4281 · CI failed · 2 unresolved threads · 0/1 approvals · needs a reviewer',
+    );
   });
 
-  test('adds conflicts and approval, and omits resolved threads', () => {
+  test('adds conflicts and omits resolved threads', () => {
     const value = snapshot([
       mr({ unresolvedThreads: 0, conflicts: true, approved: true, pipeline: undefined }),
     ]);
-    expect(text(value)).toBe('!4281 · no pipeline · conflicts · approved');
+    expect(text(value)).toBe('!4281 · no pipeline · conflicts · 0/1 approvals');
   });
 
-  test('shows pending reviewers instead of approval', () => {
-    const base = { unresolvedThreads: 0, pipeline: undefined, approved: true };
-    expect(text(snapshot([mr({ ...base, awaitingReviewers: ['david'] })]))).toBe(
-      '!4281 · no pipeline · awaiting @david',
-    );
-    expect(text(snapshot([mr({ ...base, awaitingReviewers: ['a', 'b'] })]))).toBe(
-      '!4281 · no pipeline · awaiting @a, @b',
-    );
-    expect(text(snapshot([mr({ ...base, awaitingReviewers: ['a', 'b', 'c'] })]))).toBe(
-      '!4281 · no pipeline · awaiting 3 reviewers',
-    );
-    expect(text(snapshot([mr({ ...base, awaitingReviewers: [] })]))).toBe(
-      '!4281 · no pipeline · approved',
-    );
+  test('shows approval count and waiting-on label', () => {
+    const base = { unresolvedThreads: 0, pipeline: { status: 'SUCCESS', label: 'passed' } };
+    expect(
+      text(
+        snapshot([
+          mr({ ...base, approved: true, approvalsLeft: 0, approvalRequirementsSatisfied: true }),
+        ]),
+      ),
+    ).toBe('!4281 · CI passed · 1/1 approved · ready to merge');
+    expect(
+      text(
+        snapshot([
+          mr({
+            ...base,
+            approved: true,
+            approvalsLeft: 0,
+            approvalRequirementsSatisfied: true,
+            autoMergeEnabled: true,
+          }),
+        ]),
+      ),
+    ).toBe('!4281 · CI passed · 1/1 approved · auto-merge set');
+    expect(
+      text(
+        snapshot([
+          mr({
+            ...base,
+            approved: true,
+            approvalsLeft: 0,
+            approvalRequirementsSatisfied: true,
+            pipeline: { status: 'RUNNING', label: 'running' },
+          }),
+        ]),
+      ),
+    ).toBe('!4281 · CI running · 1/1 approved · waiting on CI');
+    expect(
+      text(
+        snapshot([
+          mr({
+            ...base,
+            approved: false,
+            approvalsLeft: 1,
+            approvalsRequired: 2,
+            approvalRequirementsSatisfied: false,
+            awaitingReviewers: ['david'],
+          }),
+        ]),
+      ),
+    ).toBe('!4281 · CI passed · 1/2 approvals · awaiting @david');
+    expect(
+      text(
+        snapshot([
+          mr({ ...base, approved: false, approvalsLeft: 1, approvalRequirementsSatisfied: false }),
+        ]),
+      ),
+    ).toBe('!4281 · CI passed · 0/1 approvals · needs a reviewer');
+    expect(
+      text(
+        snapshot([
+          mr({
+            ...base,
+            approved: true,
+            approvalsLeft: 0,
+            approvalsRequired: 0,
+            approvalRequirementsSatisfied: true,
+          }),
+        ]),
+      ),
+    ).toBe('!4281 · CI passed · ready to merge');
   });
 
   test('marks incomplete thread counts', () => {
@@ -123,7 +184,7 @@ describe('footerSegments', () => {
       'PR/MR status unavailable',
     );
     expect(text(snapshot([mr()], { error }))).toBe(
-      '!4281 · CI failed · 2 unresolved threads · stale',
+      '!4281 · CI failed · 2 unresolved threads · 0/1 approvals · needs a reviewer · stale',
     );
   });
 
@@ -174,7 +235,7 @@ describe('footerSegments', () => {
       mr({ iid: '5', state: 'closed' }),
     ];
     expect(text(targets(requests))).toBe(
-      '5 MRs · 🤖 2 reviewing · 1 CI failed · 1 conflict · 1 approved · 1 merged · 1 closed',
+      '5 MRs · 🤖 2 reviewing · 1 needs you · 1 needs a reviewer · 1 ready to merge · 1 merged · 1 closed',
     );
     expect(footerSegments(targets(requests)).every((segment) => !segment.url)).toBe(true);
 
@@ -185,13 +246,13 @@ describe('footerSegments', () => {
       },
     ];
     const partial = targets(requests.slice(2, 4), failed);
-    expect(text(partial)).toBe('2 MRs · 1 approved · 1 merged · 1 unavailable');
+    expect(text(partial)).toBe('2 MRs · 1 ready to merge · 1 merged · 1 unavailable');
     expect(detailsMessage(partial)).toContain(
       'Unavailable: https://gitlab.com/group/project/-/merge_requests/6 (GitLab request failed)',
     );
     // One remaining target shows its full status, and still reports the others.
     expect(text(targets([mr()], failed))).toBe(
-      '!4281 · CI failed · 2 unresolved threads · 1 unavailable',
+      '!4281 · CI failed · 2 unresolved threads · 0/1 approvals · needs a reviewer · 1 unavailable',
     );
   });
 
@@ -236,9 +297,14 @@ describe('detailsMessage', () => {
     );
     expect(detailsMessage(snapshot([mr()]))).not.toContain('Duo review:');
   });
-  test('distinguishes actual approvals from satisfied requirements', () => {
-    const message = detailsMessage(snapshot([mr({ approvalRequirementsSatisfied: true })]));
-    expect(message).toContain('Human approvals: no · Approval requirements satisfied: yes');
+  test('shows approval count', () => {
+    const satisfied = detailsMessage(
+      snapshot([mr({ approvalRequirementsSatisfied: true, approvalsLeft: 0 })]),
+    );
+    expect(satisfied).toContain('Approvals: 1/1 (requirements satisfied)');
+    const partial = detailsMessage(snapshot([mr()]));
+    expect(partial).toContain('Approvals: 0/1');
+    expect(partial).not.toContain('(requirements satisfied)');
   });
 
   test('lists pending reviewers', () => {
@@ -248,9 +314,9 @@ describe('detailsMessage', () => {
     expect(detailsMessage(snapshot([mr()]))).not.toContain('Awaiting review:');
   });
 
-  test('reports unavailable approval requirements as unknown', () => {
-    const message = detailsMessage(snapshot([mr({ approvalRequirementsSatisfied: null })]));
-    expect(message).toContain('Approval requirements satisfied: unknown');
+  test('shows auto-merge when set', () => {
+    expect(detailsMessage(snapshot([mr({ autoMergeEnabled: true })]))).toContain('Auto-merge: set');
+    expect(detailsMessage(snapshot([mr()]))).not.toContain('Auto-merge:');
   });
 
   test('includes the URL and head mismatch', () => {
@@ -280,8 +346,10 @@ describe('responsiveFooterSegments', () => {
       .join(' · ');
 
   test('selects full, compact, and minimal formats', () => {
-    expect(responsiveText(100)).toBe('!259389 · CI passed · 2 unresolved threads · 🤖 reviewing');
-    expect(responsiveText(35)).toBe('!259389 · CI ✓ · 2 threads · 🤖');
+    expect(responsiveText(100)).toBe(
+      '!259389 · CI passed · 2 unresolved threads · 🤖 reviewing · 0/1 approvals · needs a reviewer',
+    );
+    expect(responsiveText(60)).toBe('!259389 · CI ✓ · 2 threads · 🤖 · 0/1 ✓ · needs a reviewer');
     expect(responsiveText(20)).toBe('!259389 · 🤖');
     expect(responsiveText(7)).toBe('!259389');
     expect(responsiveText(2)).toBe('');
@@ -295,7 +363,7 @@ describe('responsiveFooterSegments', () => {
   });
 
   test('preserves links and tones in compact mode', () => {
-    const segments = responsiveFooterSegments(value, 35);
+    const segments = responsiveFooterSegments(value, 60);
     expect(segments[0].url).toBe(mr().url);
     expect(segments[1]).toMatchObject({
       text: 'CI ✓',
