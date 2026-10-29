@@ -323,6 +323,7 @@ describe('GitLabForge.findByNumber', () => {
       p0: {
         mergeRequest: node({
           approved: true,
+          headPipeline: null,
           approvedBy: {
             nodes: [
               { id: 'gid://gitlab/User/9', bot: true },
@@ -368,6 +369,39 @@ describe('GitLabForge.findByNumber', () => {
       approved: true,
       awaitingReviewers: [],
     });
+  });
+
+  test('treats any-approver rule as satisfied by assigned reviewers', async () => {
+    const graphql: GraphQL = async () => ({
+      p0: {
+        mergeRequest: node({
+          approved: false,
+          headPipeline: null,
+          reviewers: { nodes: [human('paul', false)] },
+          approvalState: {
+            rules: [
+              {
+                name: 'All Members',
+                type: 'ANY_APPROVER',
+                approvalsRequired: 1,
+                approved: false,
+                eligibleApprovers: [],
+              },
+            ],
+          },
+        }),
+      },
+    });
+    const mr = await new GitLabForge(graphql).findByNumber(projects, '1');
+    expect(mr).toMatchObject({ awaitingReviewers: ['paul'] });
+    expect(mr!.missingRules[0].eligibleReviewers).toEqual(['paul']);
+    const texts = footerSegments({
+      loading: false,
+      lookup: { kind: 'found', requests: [mr!] },
+    }).map((segment) => segment.text);
+    expect(texts).toContain('awaiting @paul');
+    expect(texts).not.toContain('needs an approver');
+    expect(texts).not.toContain('needs a reviewer');
   });
 
   test('prefers the first project that has the MR', async () => {

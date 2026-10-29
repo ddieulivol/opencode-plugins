@@ -20,6 +20,14 @@ interface DiscussionPage {
   nodes: Array<{ resolvable: boolean; resolved: boolean }>;
 }
 
+interface ApprovalRuleNode {
+  name: string;
+  type: string;
+  approvalsRequired: number;
+  approved: boolean;
+  eligibleApprovers: Array<{ username: string }>;
+}
+
 interface MergeRequestNode {
   iid: string;
   title: string;
@@ -28,7 +36,7 @@ interface MergeRequestNode {
   draft: boolean;
   conflicts: boolean;
   approved: boolean | null;
-  approvedBy: { nodes: Array<{ id: string; bot?: boolean }> } | null;
+  approvedBy: { nodes: Array<{ id: string; bot?: boolean; username?: string }> } | null;
   approvalsRequired: number | null;
   approvalsLeft: number | null;
   autoMergeEnabled: boolean;
@@ -46,6 +54,7 @@ interface MergeRequestNode {
   } | null;
   discussions: DiscussionPage;
   reviewers?: { nodes: ReviewerNode[] } | null;
+  approvalState?: { rules: ApprovalRuleNode[] } | null;
 }
 
 // What `mergeRequestNumbersQuery` selects.
@@ -69,7 +78,8 @@ export const MAX_DISCUSSION_PAGES = 50;
 const MERGE_REQUEST_FIELDS = `
   iid title webUrl state draft conflicts approved detailedMergeStatus diffHeadSha updatedAt targetBranch
   approvalsRequired approvalsLeft autoMergeEnabled mergeTrainIndex
-  approvedBy(first: 100) { nodes { id bot } }
+  approvedBy(first: 100) { nodes { id bot username } }
+  approvalState { rules { name type approvalsRequired approved eligibleApprovers { username } } }
   sourceProject { fullPath }
   targetProject { fullPath }
   headPipeline { status path detailedStatus { label } }
@@ -215,10 +225,20 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
   titleReferences: (title) => prefixReferences(title, '!'),
   indicators: () => [],
   details(request) {
-    const given = request.approvalsRequired - request.approvalsLeft;
-    const lines = [
-      `Approvals: ${given}/${request.approvalsRequired}${request.approvalsLeft === 0 ? ' (requirements satisfied)' : ''}`,
-    ];
+    const lines: string[] = [];
+    if (request.approvers.length > 0)
+      lines.push(`Approved by: ${request.approvers.map((u) => `@${u}`).join(', ')}`);
+    for (const rule of request.missingRules.slice(0, 2)) {
+      const who =
+        rule.eligibleReviewers.length > 0
+          ? `, @${rule.eligibleReviewers[0]} can approve`
+          : rule.eligible.length > 0
+            ? `, none of your reviewers can approve. Ask @${rule.eligible.slice(0, 2).join(', @')}${rule.eligible.length > 2 ? ` or ${rule.eligible.length - 2} others` : ''}`
+            : '';
+      lines.push(`Still needed: ${rule.name} (${rule.required}${who})`);
+    }
+    if (request.missingRules.length > 2)
+      lines.push(`+${request.missingRules.length - 2} more rules`);
     if (request.autoMergeEnabled) lines.push('Auto-merge: set');
     if (request.mergeTrainIndex !== null)
       lines.push(`Merge train: position ${request.mergeTrainIndex + 1}`);
@@ -356,7 +376,11 @@ export class GitLabForge implements Forge {
     const pipeline = node.headPipeline;
     // A bot approval, such as Duo's when its review finds nothing, can satisfy
     // rules that require no approvals, so only people's approvals count.
-    const hasApprovals = (node.approvedBy?.nodes ?? []).some((approver) => approver.bot !== true);
+    const approvedByNodes = node.approvedBy?.nodes ?? [];
+    const hasApprovals = approvedByNodes.some((approver) => approver.bot !== true);
+    const approvers = approvedByNodes
+      .filter((a) => a.bot !== true && a.username)
+      .map((a) => a.username!);
     const awaitingReviewers = (node.reviewers?.nodes ?? [])
       .filter(
         (reviewer) =>
@@ -365,6 +389,20 @@ export class GitLabForge implements Forge {
           reviewer.mergeRequestInteraction?.approved !== true,
       )
       .map((reviewer) => reviewer.username!);
+    const missingRules = (node.approvalState?.rules ?? [])
+      .filter((rule) => rule.approvalsRequired > 0 && !rule.approved)
+      .map((rule) => {
+        const allEligible = rule.eligibleApprovers.map((e) => e.username);
+        return {
+          name: rule.name,
+          required: rule.approvalsRequired,
+          eligibleReviewers:
+            rule.type === 'ANY_APPROVER'
+              ? awaitingReviewers
+              : awaitingReviewers.filter((u) => allEligible.includes(u)),
+          eligible: allEligible.slice(0, 5),
+        };
+      });
     return {
       forge: 'gitlab',
       iid: node.iid,
@@ -376,9 +414,11 @@ export class GitLabForge implements Forge {
       conflictsKnown: true,
       approved: node.approved === true && hasApprovals && awaitingReviewers.length === 0,
       hasApprovals,
+      approvers,
       approvalRequirementsSatisfied: node.approved,
       approvalsRequired: node.approvalsRequired ?? 0,
       approvalsLeft: node.approvalsLeft ?? 0,
+      missingRules,
       autoMergeEnabled: node.autoMergeEnabled,
       mergeTrainIndex: node.mergeTrainIndex,
       awaitingReviewers,
