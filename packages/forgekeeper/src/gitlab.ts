@@ -152,6 +152,36 @@ export const DISCUSSIONS_QUERY = query<{
   }
 }`);
 
+export const ISSUE_QUERY = query<{
+  project?: {
+    workItems?: {
+      nodes: Array<{
+        state: string;
+        widgets: Array<{
+          status?: { name: string } | null;
+          assignees?: { nodes: Array<{ username: string }> };
+          labels?: { nodes: Array<{ title: string }> };
+          milestone?: { title: string } | null;
+        }>;
+      }>;
+    } | null;
+  } | null;
+}>(`query($project: ID!, $iid: String!) {
+  project(fullPath: $project) {
+    workItems(iid: $iid, first: 1) {
+      nodes {
+        state
+        widgets {
+          ... on WorkItemWidgetStatus { status { name } }
+          ... on WorkItemWidgetAssignees { assignees { nodes { username } } }
+          ... on WorkItemWidgetLabels { labels { nodes { title } } }
+          ... on WorkItemWidgetMilestone { milestone { title } }
+        }
+      }
+    }
+  }
+}`);
+
 export function classifyError(message: string, code: number): ForgeError {
   const text = message.trim().replace(/^glab:\s*/, '') || `glab exited with code ${code}`;
   if (/ENOENT|command not found/i.test(text))
@@ -259,6 +289,24 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
       return ref
         ? fetchComments(glabGraphQL(run, directory), ref.host, ref.project, ref.iid)
         : undefined;
+    },
+  },
+  issues: {
+    async fetch(run, directory, ref) {
+      const data = await typed(glabGraphQL(run, directory))(ref.host, ISSUE_QUERY, {
+        project: ref.project,
+        iid: ref.iid,
+      });
+      const node = data.project?.workItems?.nodes[0];
+      if (!node) return undefined;
+      const widgets = node.widgets;
+      return {
+        open: node.state === 'OPEN',
+        status: widgets.find((widget) => widget.status)?.status?.name,
+        assignees: widgets.flatMap((widget) => widget.assignees?.nodes ?? []).map((u) => u.username),
+        labels: widgets.flatMap((widget) => widget.labels?.nodes ?? []).map((l) => l.title),
+        milestone: widgets.find((widget) => widget.milestone)?.milestone?.title,
+      };
     },
   },
 };

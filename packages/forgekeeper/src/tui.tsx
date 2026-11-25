@@ -19,7 +19,7 @@ import {
   waitingOn,
   type Tone,
 } from './format';
-import { ownedBy, type ReviewRequest } from './forge';
+import { ownedBy, type GitLabMergeRequest, type ReviewRequest } from './forge';
 import { reference, traitsOf } from './forges';
 import { automatedReview } from './automated-review-watch';
 import { ForgeSessionRpc, HEARTBEAT, HOME, type EventData, type Output } from './rpc';
@@ -320,6 +320,36 @@ export default {
                 .awaitingReviewers.map((u) => `@${u}`)
                 .join(', ')}
             </text>
+          </Show>
+          <Show when={ownedBy('gitlab')(request())}>
+            {() => {
+              const r = request() as GitLabMergeRequest;
+              return (
+                <>
+                  <Show when={r.approvers.length > 0}>
+                    <text fg={context.theme.text.muted}>
+                      Approved by: {r.approvers.map((u) => `@${u}`).join(', ')}
+                    </text>
+                  </Show>
+                  <For each={r.missingRules.slice(0, 2)}>
+                    {(rule) => (
+                      <text fg={color('warning')}>
+                        Still needed: {rule.name} ({rule.required}
+                        {rule.eligibleReviewers.length > 0
+                          ? `, @${rule.eligibleReviewers[0]} can approve`
+                          : rule.eligible.length > 0
+                            ? `, none of your reviewers can approve. Ask @${rule.eligible.slice(0, 2).join(', @')}${rule.eligible.length > 2 ? ` or ${rule.eligible.length - 2} others` : ''}`
+                            : ''}
+                        )
+                      </text>
+                    )}
+                  </For>
+                  <Show when={r.missingRules.length > 2}>
+                    <text fg={color('warning')}>+{r.missingRules.length - 2} more rules</text>
+                  </Show>
+                </>
+              );
+            }}
           </Show>
           <Show when={!request().reviewersComplete}>
             <text fg={color('warning')}>Reviewer list is partial</text>

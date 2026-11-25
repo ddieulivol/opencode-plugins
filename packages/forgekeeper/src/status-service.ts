@@ -26,6 +26,8 @@ export interface StatusServiceOptions {
   publish: (key: string, snapshot: Snapshot) => void;
   automated?: Pick<AutomatedReviewWatcher, 'observe' | 'hasPending'>;
   human?: { check: (sessionID: string, request: ReviewRequest) => unknown };
+  needsYou?: { check: (sessionID: string, request: ReviewRequest) => unknown };
+  issues?: { check: (sessionID: string, requests: ReviewRequest[]) => unknown };
   onWatchError?: (error: unknown) => void;
   interval?: number;
   activeInterval?: number;
@@ -104,6 +106,11 @@ export function createStatusService(options: StatusServiceOptions) {
         return true;
       if (owns(key) && options.automated.hasPending(key)) return true;
     }
+    if (
+      (options.needsYou || options.issues) &&
+      targets(key, lookup).some((r) => r.state === 'opened')
+    )
+      return true;
     return watchedForFeedback(key, lookup).length > 0;
   }
 
@@ -141,6 +148,21 @@ export function createStatusService(options: StatusServiceOptions) {
       track(
         Promise.resolve()
           .then(() => options.human?.check(key, request))
+          .catch(report),
+      );
+    }
+    for (const request of targets(key, next)) {
+      track(
+        Promise.resolve()
+          .then(() => options.needsYou?.check(key, request))
+          .catch(report),
+      );
+    }
+    const current = targets(key, next);
+    if (options.issues && current.length > 0) {
+      track(
+        Promise.resolve()
+          .then(() => options.issues?.check(key, current))
           .catch(report),
       );
     }

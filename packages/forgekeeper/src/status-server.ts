@@ -11,7 +11,7 @@ import {
 } from './automated-review-watch';
 import type { Exec } from './exec';
 import type { FeedbackSnapshot, ReviewComment, ReviewRequest } from './forge';
-import { reference, traitsOf, type ForgeCatalog } from './forges';
+import { reference, traits, traitsOf, type ForgeCatalog } from './forges';
 import {
   applyFeedback,
   createFeedbackWatcher,
@@ -20,6 +20,14 @@ import {
   isExpired,
   type FeedbackRecord,
 } from './human-review-watch';
+import { createIssueWatcher, issueMessage, issueToast, type IssueRecord } from './issue-watch';
+import {
+  createNeedsYouWatcher,
+  needsYouKey,
+  needsYouMessage,
+  needsYouToast,
+  type NeedsYouRecord,
+} from './needs-you-watch';
 import { locate } from './locate';
 import type { StatusOptions } from './options';
 import type { Notice } from './rpc';
@@ -59,6 +67,10 @@ export interface StatusHost {
 // records. Encoding keeps IDs and URLs from adding path separators.
 const PENDING_PREFIX = 'status/pending/';
 const FEEDBACK_PREFIX = 'status/feedback/';
+const NEEDS_YOU_PREFIX = 'status/needs-you/';
+const needsYouRecordKey = (key: string) => `${NEEDS_YOU_PREFIX}${encodeURIComponent(key)}`;
+const ISSUES_PREFIX = 'status/issues/';
+const issueRecordKey = (key: string) => `${ISSUES_PREFIX}${encodeURIComponent(key)}`;
 const pendingPrefix = (sessionID: string) => `${PENDING_PREFIX}${encodeURIComponent(sessionID)}/`;
 const pendingKey = (sessionID: string, url: string) =>
   `${pendingPrefix(sessionID)}${encodeURIComponent(url)}`;
@@ -263,6 +275,66 @@ export async function setupStatus(
       })
     : undefined;
 
+  const needsYou = settings.notifyNeedsYou
+    ? createNeedsYouWatcher({
+        record: async (key) =>
+          (await ctx.storage.get(needsYouRecordKey(key))) as NeedsYouRecord | undefined,
+        persist: (key, record) =>
+          write(async () => {
+            if (record) await ctx.storage.set(needsYouRecordKey(key), record as never);
+            else await ctx.storage.remove(needsYouRecordKey(key));
+          }),
+        current: (sessionID, request) => isTarget(sessionID, request.url),
+        async send(sessionID, request, reason) {
+          const sent = await tell(sessionID, [request], () => ({
+            text: needsYouMessage(request, reason),
+            description: needsYouToast(request, reason).title,
+          }));
+          if (sent.length > 0)
+            notice({ sessionID, ...needsYouToast(request, reason), variant: 'info' });
+        },
+        onSendError: (error) => {
+          const reason = error instanceof Error ? error.message : String(error);
+          notice({
+            message: `Could not tell the session about an MR that needs action: ${reason}`,
+            variant: 'error',
+          });
+        },
+        now: deps.now,
+      })
+    : undefined;
+
+  const issues = settings.notifyIssues
+    ? createIssueWatcher({
+        targets: async (sessionID) => (await host.state(sessionID)).targets,
+        fetch: async (ref) =>
+          closing ? undefined : traits(ref.forge).issues?.fetch(deps.exec, directory, ref),
+        record: async (key) =>
+          (await ctx.storage.get(issueRecordKey(key))) as IssueRecord | undefined,
+        persist: (key, record) =>
+          write(async () => {
+            if (record) await ctx.storage.set(issueRecordKey(key), record as never);
+            else await ctx.storage.remove(issueRecordKey(key));
+          }),
+        async send(sessionID, ref, requests, problems) {
+          const sent = await tell(sessionID, requests, (current) => ({
+            text: issueMessage(ref, current, problems),
+            description: issueToast(ref).title,
+          }));
+          if (sent.length > 0) notice({ sessionID, ...issueToast(ref), variant: 'info' });
+        },
+        onFetchError: (error) => reportOnce('issue-fetch', 'Could not check the issue', error),
+        onSendError: (error) => {
+          const reason = error instanceof Error ? error.message : String(error);
+          notice({
+            message: `Could not tell the session about an outdated issue: ${reason}`,
+            variant: 'error',
+          });
+        },
+        now: deps.now,
+      })
+    : undefined;
+
   const service = createStatusService({
     async load(key, previous) {
       if (key === HOME) return locate(deps.forges, { directory });
@@ -287,6 +359,8 @@ export async function setupStatus(
     publish: host.publish,
     automated,
     human,
+    needsYou,
+    issues,
     onWatchError: (error) => reportOnce('watch', 'PR/MR status watcher failed', error),
     interval: settings.pollSeconds * 1000,
     activeInterval: Math.min(settings.pollSeconds, REVIEW_POLL_SECONDS) * 1000,
@@ -300,6 +374,12 @@ export async function setupStatus(
     const at = (deps.now ?? Date.now)();
     for (const { key, value } of await scanAll(FEEDBACK_PREFIX)) {
       if (isExpired(value as FeedbackRecord, at)) await ctx.storage.remove(key);
+    }
+    for (const { key, value } of await scanAll(NEEDS_YOU_PREFIX)) {
+      if (needsYou?.isExpired(value as NeedsYouRecord, at)) await ctx.storage.remove(key);
+    }
+    for (const { key, value } of await scanAll(ISSUES_PREFIX)) {
+      if (issues?.isExpired(value as IssueRecord, at)) await ctx.storage.remove(key);
     }
   });
 

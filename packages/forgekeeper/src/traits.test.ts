@@ -24,9 +24,11 @@ const merge: GitLabMergeRequest = {
   forge: 'gitlab',
   url: 'https://gitlab.com/o/r/-/merge_requests/7',
   hasApprovals: false,
+  approvers: [],
   approvalRequirementsSatisfied: null,
   approvalsRequired: 1,
   approvalsLeft: 1,
+  missingRules: [],
   autoMergeEnabled: false,
   mergeTrainIndex: null,
   duoReviewState: 'REVIEW_STARTED',
@@ -78,10 +80,7 @@ describe('forge traits', () => {
   test("resolve the traits of a request's own forge", () => {
     expect(traitsOf(merge)).toBe(traits('gitlab'));
     expect(traitsOf(pull)).toBe(traits('github'));
-    expect(traitsOf(merge).details(merge)).toEqual([
-      'Approvals: 0/1',
-      'Merge status: ci must pass',
-    ]);
+    expect(traitsOf(merge).details(merge)).toEqual(['Merge status: ci must pass']);
     expect(traitsOf(pull).details(pull)).toEqual(['Review decision: changes requested']);
   });
 
@@ -94,7 +93,7 @@ describe('forge traits', () => {
       '!7',
       'no pipeline',
       '🤖 reviewing',
-      '0/1 approvals',
+      '1 more needed',
       'needs a reviewer',
     ]);
     expect(text(pull)).toEqual(['#7', 'no checks', 'changes requested']);

@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { detailsMessage, footerSegments, responsiveFooterSegments, segmentsWidth } from './format';
+import {
+  detailsMessage,
+  footerSegments,
+  needsYouReason,
+  responsiveFooterSegments,
+  segmentsWidth,
+} from './format';
 import type { Repository } from './git';
 import type { GitLabMergeRequest } from './forge';
 import type { Snapshot } from './store';
@@ -25,9 +31,11 @@ const mr = (overrides: Partial<GitLabMergeRequest> = {}): GitLabMergeRequest => 
   conflicts: false,
   approved: false,
   hasApprovals: false,
+  approvers: [],
   approvalRequirementsSatisfied: false,
   approvalsRequired: 1,
   approvalsLeft: 1,
+  missingRules: [],
   autoMergeEnabled: false,
   mergeTrainIndex: null,
   targetProject: 'group/project',
@@ -54,7 +62,7 @@ const text = (value: Snapshot) =>
 describe('footerSegments', () => {
   test('shows an active Duo review', () => {
     expect(text(snapshot([mr({ duoReviewState: 'REVIEW_STARTED' })]))).toBe(
-      '!4281 · CI failed · 2 unresolved threads · 🤖 reviewing · 0/1 approvals · needs a reviewer',
+      '!4281 · CI failed · 2 unresolved threads · 🤖 reviewing · 1 more needed · needs you: CI failed',
     );
   });
 
@@ -72,7 +80,7 @@ describe('footerSegments', () => {
   });
   test('shows the MR, pipeline, and threads', () => {
     expect(text(snapshot([mr()]))).toBe(
-      '!4281 · CI failed · 2 unresolved threads · 0/1 approvals · needs a reviewer',
+      '!4281 · CI failed · 2 unresolved threads · 1 more needed · needs you: CI failed',
     );
   });
 
@@ -80,7 +88,17 @@ describe('footerSegments', () => {
     const value = snapshot([
       mr({ unresolvedThreads: 0, conflicts: true, approved: true, pipeline: undefined }),
     ]);
-    expect(text(value)).toBe('!4281 · no pipeline · conflicts · 0/1 approvals');
+    expect(text(value)).toBe('!4281 · no pipeline · conflicts · 1 more needed');
+  });
+
+  test('does not ask for changes while Duo is re-reviewing', () => {
+    const changes = mr({ mergeStatus: 'REQUESTED_CHANGES', pipeline: undefined });
+    expect(needsYouReason(changes)).toBe('changes requested');
+    expect(text(snapshot([changes]))).toContain('needs you: changes requested');
+
+    const reviewing = { ...changes, duoReviewState: 'REVIEW_STARTED' };
+    expect(needsYouReason(reviewing)).toBeUndefined();
+    expect(text(snapshot([reviewing]))).not.toContain('changes requested');
   });
 
   test('shows approval count and waiting-on label', () => {
@@ -88,42 +106,51 @@ describe('footerSegments', () => {
     expect(
       text(
         snapshot([
-          mr({ ...base, approved: true, approvalsLeft: 0, approvalRequirementsSatisfied: true }),
+          mr({
+            ...base,
+            approved: true,
+            approvers: ['alice'],
+            approvalsLeft: 0,
+            approvalRequirementsSatisfied: true,
+          }),
         ]),
       ),
-    ).toBe('!4281 · CI passed · 1/1 approved · ready to merge');
+    ).toBe('!4281 · CI passed · 1 approved · ready to merge');
     expect(
       text(
         snapshot([
           mr({
             ...base,
             approved: true,
+            approvers: ['alice'],
             approvalsLeft: 0,
             approvalRequirementsSatisfied: true,
             autoMergeEnabled: true,
           }),
         ]),
       ),
-    ).toBe('!4281 · CI passed · 1/1 approved · auto-merge set');
+    ).toBe('!4281 · CI passed · 1 approved · auto-merge set');
     expect(
       text(
         snapshot([
           mr({
             ...base,
             approved: true,
+            approvers: ['alice'],
             approvalsLeft: 0,
             approvalRequirementsSatisfied: true,
             pipeline: { status: 'RUNNING', label: 'running' },
           }),
         ]),
       ),
-    ).toBe('!4281 · CI running · 1/1 approved · waiting on CI');
+    ).toBe('!4281 · CI running · 1 approved · waiting on CI');
     expect(
       text(
         snapshot([
           mr({
             ...base,
             approved: false,
+            approvers: ['alice'],
             approvalsLeft: 1,
             approvalsRequired: 2,
             approvalRequirementsSatisfied: false,
@@ -131,20 +158,21 @@ describe('footerSegments', () => {
           }),
         ]),
       ),
-    ).toBe('!4281 · CI passed · 1/2 approvals · awaiting @david');
+    ).toBe('!4281 · CI passed · 1 approval · 1 more needed · awaiting @david');
     expect(
       text(
         snapshot([
           mr({ ...base, approved: false, approvalsLeft: 1, approvalRequirementsSatisfied: false }),
         ]),
       ),
-    ).toBe('!4281 · CI passed · 0/1 approvals · needs a reviewer');
+    ).toBe('!4281 · CI passed · 1 more needed · needs a reviewer');
     expect(
       text(
         snapshot([
           mr({
             ...base,
             approved: true,
+            approvers: [],
             approvalsLeft: 0,
             approvalsRequired: 0,
             approvalRequirementsSatisfied: true,
@@ -184,7 +212,7 @@ describe('footerSegments', () => {
       'PR/MR status unavailable',
     );
     expect(text(snapshot([mr()], { error }))).toBe(
-      '!4281 · CI failed · 2 unresolved threads · 0/1 approvals · needs a reviewer · stale',
+      '!4281 · CI failed · 2 unresolved threads · 1 more needed · needs you: CI failed · stale',
     );
   });
 
@@ -230,12 +258,19 @@ describe('footerSegments', () => {
         conflicts: true,
         pipeline: { status: 'SUCCESS', label: 'passed' },
       }),
-      mr({ iid: '3', approved: true, pipeline: undefined }),
+      mr({
+        iid: '3',
+        approved: true,
+        approvers: ['alice'],
+        approvalsLeft: 0,
+        approvalRequirementsSatisfied: true,
+        pipeline: undefined,
+      }),
       mr({ iid: '4', state: 'merged' }),
       mr({ iid: '5', state: 'closed' }),
     ];
     expect(text(targets(requests))).toBe(
-      '5 MRs · 🤖 2 reviewing · 1 needs you · 1 needs a reviewer · 1 ready to merge · 1 merged · 1 closed',
+      '5 MRs · 🤖 2 reviewing · 2 needs you · 1 ready to merge · 1 merged · 1 closed',
     );
     expect(footerSegments(targets(requests)).every((segment) => !segment.url)).toBe(true);
 
@@ -252,7 +287,7 @@ describe('footerSegments', () => {
     );
     // One remaining target shows its full status, and still reports the others.
     expect(text(targets([mr()], failed))).toBe(
-      '!4281 · CI failed · 2 unresolved threads · 0/1 approvals · needs a reviewer · 1 unavailable',
+      '!4281 · CI failed · 2 unresolved threads · 1 more needed · needs you: CI failed · 1 unavailable',
     );
   });
 
@@ -297,14 +332,27 @@ describe('detailsMessage', () => {
     );
     expect(detailsMessage(snapshot([mr()]))).not.toContain('Duo review:');
   });
-  test('shows approval count', () => {
-    const satisfied = detailsMessage(
-      snapshot([mr({ approvalRequirementsSatisfied: true, approvalsLeft: 0 })]),
+  test('shows approval details', () => {
+    const withApprover = detailsMessage(
+      snapshot([
+        mr({ approvers: ['alice'], approvalRequirementsSatisfied: true, approvalsLeft: 0 }),
+      ]),
     );
-    expect(satisfied).toContain('Approvals: 1/1 (requirements satisfied)');
-    const partial = detailsMessage(snapshot([mr()]));
-    expect(partial).toContain('Approvals: 0/1');
-    expect(partial).not.toContain('(requirements satisfied)');
+    expect(withApprover).toContain('Approved by: @alice');
+    expect(withApprover).not.toContain('Still needed:');
+    const withMissing = detailsMessage(
+      snapshot([
+        mr({
+          missingRules: [
+            { name: '/AGENTS.md', required: 1, eligibleReviewers: ['tkuah'], eligible: ['tkuah'] },
+          ],
+        }),
+      ]),
+    );
+    expect(withMissing).toContain('Still needed: /AGENTS.md (1, @tkuah can approve)');
+    const noApprovers = detailsMessage(snapshot([mr()]));
+    expect(noApprovers).not.toContain('Approved by:');
+    expect(noApprovers).not.toContain('Still needed:');
   });
 
   test('lists pending reviewers', () => {
@@ -347,9 +395,9 @@ describe('responsiveFooterSegments', () => {
 
   test('selects full, compact, and minimal formats', () => {
     expect(responsiveText(100)).toBe(
-      '!259389 · CI passed · 2 unresolved threads · 🤖 reviewing · 0/1 approvals · needs a reviewer',
+      '!259389 · CI passed · 2 unresolved threads · 🤖 reviewing · 1 more needed · needs a reviewer',
     );
-    expect(responsiveText(60)).toBe('!259389 · CI ✓ · 2 threads · 🤖 · 0/1 ✓ · needs a reviewer');
+    expect(responsiveText(60)).toBe('!259389 · CI ✓ · 2 threads · 🤖 · +1 · needs a reviewer');
     expect(responsiveText(20)).toBe('!259389 · 🤖');
     expect(responsiveText(7)).toBe('!259389');
     expect(responsiveText(2)).toBe('');

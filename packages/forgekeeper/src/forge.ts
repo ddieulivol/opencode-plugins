@@ -38,13 +38,26 @@ interface Common {
   threadsComplete: boolean;
 }
 
+export interface MissingRule {
+  name: string;
+  required: number;
+  // Assigned reviewers who can approve this rule.
+  eligibleReviewers: string[];
+  // First 5 eligible approvers overall (for suggestions when no reviewer qualifies).
+  eligible: string[];
+}
+
 export interface GitLabMergeRequest extends Common {
   forge: 'gitlab';
   // Approvals from people; bot approvals such as Duo's don't count.
   hasApprovals: boolean;
+  // Human usernames who approved (bots excluded).
+  approvers: string[];
   approvalRequirementsSatisfied: boolean | null;
   approvalsRequired: number;
   approvalsLeft: number;
+  // Required approval rules that are not yet satisfied.
+  missingRules: MissingRule[];
   autoMergeEnabled: boolean;
   mergeTrainIndex: number | null;
   mergeStatus?: string;
@@ -117,6 +130,23 @@ export interface ForgeTraits<
   // Optional capabilities. Shared code checks for these, never for a forge.
   readonly automatedReview?: AutomatedReview<Request>;
   readonly feedback?: ReviewFeedback<Request>;
+  readonly issues?: IssueReader;
+}
+
+// The issue fields that a PR/MR's progress can leave outdated.
+export interface IssueSnapshot {
+  open: boolean;
+  // The work item status, such as "In dev". Undefined without one.
+  status?: string;
+  assignees: string[];
+  labels: string[];
+  milestone?: string;
+}
+
+// Reads an issue, for noticing that its fields are outdated.
+export interface IssueReader {
+  // Undefined when the issue doesn't exist or can't be seen.
+  fetch(run: Exec, directory: string, ref: ReviewRef): Promise<IssueSnapshot | undefined>;
 }
 
 // `running` reviews poll faster, and a review that goes from `running` to

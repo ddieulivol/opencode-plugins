@@ -47,45 +47,72 @@ function awaitingText(reviewers: string[]) {
   return `awaiting ${reviewers.map((username) => `@${username}`).join(', ')}`;
 }
 
-// "1/2 approvals" or "2/2 approved". Returns undefined when no approvals are required.
+// "N approval(s)" or "N approval(s) · K more needed" or "K more needed". Returns undefined when nobody approved and nothing is required.
 export function approvalCount(request: GitLabMergeRequest): Segment | undefined {
-  const { approvalsRequired, approvalsLeft } = request;
-  if (approvalsRequired === 0) return undefined;
-  const given = approvalsRequired - approvalsLeft;
-  const done = approvalsLeft === 0;
+  const { approvers, approvalsRequired, approvalsLeft } = request;
+  const given = approvers.length;
+  if (approvalsRequired === 0 && given === 0) return undefined;
+  const moreNeeded = approvalsLeft > 0;
+  if (given === 0 && moreNeeded) {
+    return { text: `${approvalsLeft} more needed`, compact: `+${approvalsLeft}`, tone: 'warning' };
+  }
+  const base = given === 1 ? '1 approval' : `${given} approvals`;
+  const compactBase = `${given} ✓`;
+  if (!moreNeeded) {
+    return { text: `${given} approved`, compact: compactBase, tone: 'success' };
+  }
   return {
-    text: done
-      ? `${approvalsRequired}/${approvalsRequired} approved`
-      : `${given}/${approvalsRequired} approvals`,
-    compact: done
-      ? `${approvalsRequired}/${approvalsRequired} ✓`
-      : `${given}/${approvalsRequired} ✓`,
-    tone: done ? 'success' : 'warning',
+    text: `${base} · ${approvalsLeft} more needed`,
+    compact: `${compactBase} +${approvalsLeft}`,
+    tone: 'warning',
   };
+}
+
+export type NeedsYouReason = 'CI failed' | 'changes requested' | 'conflicts';
+
+// A Duo re-review in progress supersedes the earlier request: GitLab can keep reporting
+// REQUESTED_CHANGES as the merge status until the new review finishes.
+function changesRequested(request: GitLabMergeRequest): boolean {
+  return (
+    (request.awaitingReviewers?.length ?? 0) === 0 &&
+    !request.approvalRequirementsSatisfied &&
+    request.mergeStatus === 'REQUESTED_CHANGES' &&
+    request.duoReviewState !== 'REVIEW_STARTED'
+  );
+}
+
+// Why does this MR need immediate action? Returns undefined when it doesn't.
+export function needsYouReason(request: GitLabMergeRequest): NeedsYouReason | undefined {
+  if (request.state !== 'opened' || request.draft) return undefined;
+  if (request.conflicts) return 'conflicts';
+  if (changesRequested(request)) return 'changes requested';
+  if (pipelineTone(request.pipeline) === 'error') return 'CI failed';
+  return undefined;
 }
 
 // What is blocking this MR from merging? Returns the most actionable label.
 export function waitingOn(request: GitLabMergeRequest): Segment | undefined {
   if (request.draft) return undefined;
 
-  const changesRequested =
-    request.awaitingReviewers.length === 0 &&
-    !request.approvalRequirementsSatisfied &&
-    request.mergeStatus === 'REQUESTED_CHANGES';
-  if (changesRequested)
+  if (changesRequested(request))
     return { text: 'needs you: changes requested', tone: 'error', essential: true };
 
   if (request.conflicts) return undefined;
 
+  const ciTone = pipelineTone(request.pipeline);
+  if (ciTone === 'error') return { text: 'needs you: CI failed', tone: 'error', essential: true };
+
   if (!request.approved) {
+    const unqualified = request.missingRules.find((r) => r.eligibleReviewers.length === 0);
+    if (unqualified) {
+      const label = unqualified.name.startsWith('/') ? 'needs a code owner' : 'needs an approver';
+      return { text: label, tone: 'warning' };
+    }
     if (request.awaitingReviewers.length) {
       return { text: awaitingText(request.awaitingReviewers), tone: 'muted' };
     }
     return { text: 'needs a reviewer', tone: 'muted' };
   }
-
-  const ciTone = pipelineTone(request.pipeline);
-  if (ciTone === 'error') return { text: 'needs you: CI failed', tone: 'error', essential: true };
 
   if (request.mergeTrainIndex !== null) {
     return { text: `merge train #${request.mergeTrainIndex + 1}`, tone: 'muted' };
@@ -148,7 +175,12 @@ export function groupOf(request: ReviewRequest): GroupKey {
   const w = waitingOn(request);
   if (!w) return 'other';
   if (w.text.startsWith('needs you')) return 'needsYou';
-  if (w.text === 'needs a reviewer') return 'needsReviewer';
+  if (
+    w.text === 'needs a reviewer' ||
+    w.text === 'needs a code owner' ||
+    w.text === 'needs an approver'
+  )
+    return 'needsReviewer';
   if (w.text === 'ready to merge') return 'readyToMerge';
   if (w.text === 'auto-merge set' || w.text === 'auto-merge set, CI running') return 'autoMerge';
   if (request.mergeTrainIndex !== null) return 'autoMerge';

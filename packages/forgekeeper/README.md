@@ -279,6 +279,7 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 | `pollSeconds`            | `120`            | Normal polling interval. Running automated reviews poll at 30 seconds or this value, whichever is lower.                           |
 | `notifyAutomatedReviews` | `true`           | Tell the agent when an automated review finishes with feedback. The former name, `notifyDuoReview`, still works.                   |
 | `notifyHumanReviews`     | `true`           | Tell the agent about new human review feedback.                                                                                    |
+| `notifyIssues`           | `true`           | Tell the agent when the issue behind an MR is outdated: status, assignee, `group::`/type labels or milestone. GitLab only.         |
 | `resumeSession`          | `true`           | Resume the session when telling the agent about a review. Set to `false` to queue the message for the session's next turn instead. |
 
 The server entry point reads every option, so changing one takes effect when the server

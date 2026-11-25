@@ -8,6 +8,8 @@ describe('statusOptions', () => {
       pollSeconds: 120,
       notifyAutomatedReviews: true,
       notifyHumanReviews: true,
+      notifyNeedsYou: true,
+      notifyIssues: true,
       resumeSession: true,
     });
   });
@@ -19,6 +21,8 @@ describe('statusOptions', () => {
         pollSeconds: 45,
         notifyAutomatedReviews: false,
         notifyHumanReviews: false,
+        notifyNeedsYou: false,
+        notifyIssues: false,
         resumeSession: false,
       }),
     ).toEqual({
@@ -26,6 +30,8 @@ describe('statusOptions', () => {
       pollSeconds: 45,
       notifyAutomatedReviews: false,
       notifyHumanReviews: false,
+      notifyNeedsYou: false,
+      notifyIssues: false,
       resumeSession: false,
     });
   });

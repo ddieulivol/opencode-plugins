@@ -6,6 +6,8 @@ export interface StatusOptions {
   pollSeconds: number;
   notifyAutomatedReviews: boolean;
   notifyHumanReviews: boolean;
+  notifyNeedsYou: boolean;
+  notifyIssues: boolean;
   // Whether a review notification resumes the session, or waits in its
   // queue for the next turn.
   resumeSession: boolean;
@@ -20,6 +22,8 @@ export function statusOptions(options: unknown): StatusOptions {
     // `notifyDuoReview` is the option's former name.
     notifyAutomatedReviews: (source.notifyAutomatedReviews ?? source.notifyDuoReview) !== false,
     notifyHumanReviews: source.notifyHumanReviews !== false,
+    notifyNeedsYou: source.notifyNeedsYou !== false,
+    notifyIssues: source.notifyIssues !== false,
     resumeSession: source.resumeSession !== false,
   };
 }
